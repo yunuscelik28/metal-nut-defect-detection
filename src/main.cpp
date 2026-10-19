@@ -1,4 +1,3 @@
-#include <functional>
 #include <iostream>
 #include <opencv2/core.hpp>
 #include <opencv2/core/base.hpp>
@@ -14,17 +13,21 @@
 using namespace std;
 using namespace cv;
 
-int main() {
+int main(int argc, char **argv) {
+  if (argc < 2) {
+    cerr << "Usage: ./mtest <image_path>\n";
+    return -1;
+  }
+
   // Input image file path
-  string path = "../data/metal_nut/train/good/000.png";
+  string path = argv[1];
 
   // Load the target image from disk
   Mat image = imread(path);
 
   // Check if the image was successfully loaded
   if (image.empty()) {
-    cout << "Error: Image file not found at " << path << endl;
-    cin.get();
+    cerr << "Error: Image file not found at " << path << "\n";
     return -1;
   }
 
@@ -32,32 +35,103 @@ int main() {
   cvtColor(image, grayImage, COLOR_BGR2GRAY);
   GaussianBlur(grayImage, blurImage, Size(5, 5), 0);
 
-  Mat hsvImage;
-  cvtColor(image, hsvImage, COLOR_BGR2HSV);
-
-  vector<Mat> hsvChannels;
-  split(hsvImage, hsvChannels);
-
-  Mat saturationBlr;
-  GaussianBlur(hsvChannels[1], saturationBlr, Size(5, 5), 0);
-
   Mat binaryImage;
-  threshold(blurImage, binaryImage, 0, 255, THRESH_BINARY + THRESH_OTSU);
+  double otsuThreshold =
+      threshold(blurImage, binaryImage, 0, 255, THRESH_BINARY + THRESH_OTSU);
+  cout << "Otsu threshold: " << otsuThreshold << "\n";
 
   vector<vector<Point>> contours;
   vector<Vec4i> hierarchy;
-  Mat contourOutput = Mat::zeros(binaryImage.size(), CV_8UC1);
-  findContours(binaryImage, contours, hierarchy, RETR_CCOMP, CHAIN_APPROX_NONE);
-  drawContours(contourOutput, contours, -1, Scalar(255), FILLED);
+  findContours(binaryImage, contours, hierarchy, RETR_CCOMP,
+               CHAIN_APPROX_SIMPLE);
 
-  Mat cleanImage;
-  Mat kernel = getStructuringElement(MORPH_ELLIPSE, Size(5, 5));
-  morphologyEx(contourOutput, cleanImage, MORPH_OPEN, kernel);
+  int outerIndex = -1;
+  double largestOA = 0.0;
 
-  // Display the final output image
-  // imshow("Test", out);
-  // Wait for any key press before closing
-  imshow("Test", binaryImage);
+  for (int i = 0; i < static_cast<int>(contours.size()); ++i) {
+    if (hierarchy[i][3] != -1) {
+      continue;
+    }
+
+    double area = contourArea(contours[i]);
+
+    if (area > largestOA) {
+      largestOA = area;
+      outerIndex = i;
+    }
+  }
+
+  if (outerIndex == -1) {
+    cerr << "No outer contour found.\n";
+    return -1;
+  }
+
+  vector<Point> hull;
+  convexHull(contours[outerIndex], hull);
+
+  double hullArea = contourArea(hull);
+  double solidity = 0.0;
+  double perimeter = 0.0;
+
+  if (hullArea > 0) {
+    solidity = largestOA / hullArea;
+  }
+
+  perimeter = arcLength(contours[outerIndex], true);
+
+  cout << "Area: " << largestOA << "\n";
+  cout << "Solidity: " << solidity << "\n";
+  cout << "Perimeter: " << perimeter << "\n";
+
+  Mat outerMask = Mat::zeros(binaryImage.size(), CV_8UC1);
+
+  drawContours(outerMask, contours, outerIndex, Scalar(255), FILLED);
+
+  Mat ringKernel = getStructuringElement(MORPH_ELLIPSE, Size(71, 71));
+
+  Mat expandedMask;
+  dilate(outerMask, expandedMask, ringKernel);
+
+  Mat ringMask;
+  subtract(expandedMask, outerMask, ringMask);
+
+  Mat contourOutput = outerMask.clone();
+
+  int holeIndex = -1;
+  double largestHA = 0.0;
+
+  for (int i = 0; i < static_cast<int>(contours.size()); ++i) {
+    if (hierarchy[i][3] != outerIndex) {
+      continue;
+    }
+
+    double area = contourArea(contours[i]);
+
+    if (area > largestHA) {
+      largestHA = area;
+      holeIndex = i;
+    }
+  }
+
+  if (holeIndex != -1) {
+    drawContours(contourOutput, contours, holeIndex, Scalar(0), FILLED);
+  } else {
+    cerr << "No hole found in the selected contour.\n";
+  }
+
+  Mat maskBgr;
+  cvtColor(contourOutput, maskBgr, COLOR_GRAY2BGR);
+
+  Mat comparison;
+  hconcat(image, maskBgr, comparison);
+
+  imshow("1 - Deliksiz maske", outerMask);
+  imshow("2 - Genisletilmis maske", expandedMask);
+  imshow("3 - Dis halka", ringMask);
+
+  if (!imwrite("nut_result.png", comparison)) {
+    cerr << "Could not save the result.\n";
+  }
   waitKey(0);
   return 0;
 }
