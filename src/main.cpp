@@ -1,11 +1,6 @@
 /**
  * @file main.cpp
- * @brief Metal nut segmentation and bent-tab detection (MVTec AD metal_nut).
- *
- * Segments the nut with grayscale Otsu, measures its outer contour, finds
- * the center hole as the largest dark circle near the centroid, and flags a
- * bent tab when the silhouette perimeter is too long or gray pixels show up
- * in a band outside the silhouette.
+ * @brief Finds the metal nut in the image and checks it for bent tabs.
  */
 
 #include <iostream>
@@ -22,19 +17,6 @@
 
 using namespace std;
 using namespace cv;
-
-/*
- * Thresholds measured on all 220 train/good + 22 test/good images:
- * - Good perimeters are 2154..2261 px, so 2300 leaves a small margin.
- * - Good nuts never have gray pixels farther than ~15 px from their edge
- *   (max 0 in the band), bent ones have 1000+ when the perimeter misses them.
- */
-const double kPerimeterLimit = 2300.0;
-const int kBandInnerKernel = 31;  // band starts ~15 px outside the silhouette
-const int kBandOuterKernel = 101; // and ends ~50 px outside it
-const double kBackgroundMargin = 10.0;
-const int kBandPixelLimit = 100;
-const int kHoleSearchRadius = 60;
 
 int main(int argc, char **argv) {
   if (argc < 2) {
@@ -107,118 +89,69 @@ int main(int argc, char **argv) {
   cout << "Perimeter: " << perimeter << "\n";
 
   Mat outerMask = Mat::zeros(binaryImage.size(), CV_8UC1);
-
   drawContours(outerMask, contours, outerIndex, Scalar(255), FILLED);
 
-  /*
-   * Background level:
-   * - farMask: everything well away from the nut (pure background).
-   * - backgroundLevel: mean brightness there, used as the lower gray bound.
-   */
-  Mat farMask;
-  dilate(outerMask, farMask,
-         getStructuringElement(MORPH_ELLIPSE, Size(151, 151)));
-  double backgroundLevel = mean(blurImage, ~farMask)[0];
+  // Ring around the nut. The first ~15 px are the blurry edge of the nut,
+  // so the ring starts after that (small kernel) and ends ~50 px out.
+  Mat smallKernel = getStructuringElement(MORPH_ELLIPSE, Size(31, 31));
+  Mat bigKernel = getStructuringElement(MORPH_ELLIPSE, Size(101, 101));
 
-  /*
-   * Outer band check (bent tabs):
-   * A bent tab is darker than the nut, so Otsu drops it from the silhouette,
-   * but it is still brighter than the background. The first ~15 px around a
-   * good nut are a soft blurry edge, so the band starts beyond that.
-   */
-  Mat bandOuter, bandInner, bandMask;
-  dilate(outerMask, bandOuter,
-         getStructuringElement(MORPH_ELLIPSE,
-                               Size(kBandOuterKernel, kBandOuterKernel)));
-  dilate(outerMask, bandInner,
-         getStructuringElement(MORPH_ELLIPSE,
-                               Size(kBandInnerKernel, kBandInnerKernel)));
-  subtract(bandOuter, bandInner, bandMask);
+  Mat smallExpanded, bigExpanded;
+  dilate(outerMask, smallExpanded, smallKernel);
+  dilate(outerMask, bigExpanded, bigKernel);
 
+  Mat ringMask;
+  subtract(bigExpanded, smallExpanded, ringMask);
+
+  // A bent tab is darker than the nut but brighter than the background.
+  // Background is about 25, so gray means between 35 and the Otsu value.
   Mat grayPixels;
-  inRange(blurImage, backgroundLevel + kBackgroundMargin, otsuThreshold,
-          grayPixels);
-  bitwise_and(grayPixels, bandMask, grayPixels);
-  int bandPixels = countNonZero(grayPixels);
+  inRange(blurImage, 35, otsuThreshold, grayPixels);
+  bitwise_and(grayPixels, ringMask, grayPixels);
 
-  cout << "Background level: " << backgroundLevel << "\n";
-  cout << "Band gray pixels: " << bandPixels << "\n";
+  int ringPixels = countNonZero(grayPixels);
+  cout << "Gray pixels in ring: " << ringPixels << "\n";
 
-  /*
-   * Center hole:
-   * The contour hierarchy is unreliable here (dark surface texture can merge
-   * with the hole), so the hole is the largest dark circle near the centroid.
-   * The convex hull is used as the search area so a stain that connects the
-   * hole to the background does not hide it.
-   */
-  Moments nutMoments = moments(contours[outerIndex]);
-  Point2d centroid(nutMoments.m10 / nutMoments.m00,
-                   nutMoments.m01 / nutMoments.m00);
+  // Center hole: find the dark pixel that is farthest from any bright pixel.
+  // Its distance is the hole radius. Only search near the nut center.
+  Mat distImage;
+  distanceTransform(~binaryImage, distImage, DIST_L2, 3);
 
-  Mat hullMask = Mat::zeros(binaryImage.size(), CV_8UC1);
-  fillConvexPoly(hullMask, hull, Scalar(255));
+  Rect box = boundingRect(contours[outerIndex]);
+  Point nutCenter(box.x + box.width / 2, box.y + box.height / 2);
 
-  Mat darkInside;
-  bitwise_and(~binaryImage, hullMask, darkInside);
-  morphologyEx(darkInside, darkInside, MORPH_OPEN,
-               getStructuringElement(MORPH_ELLIPSE, Size(5, 5)));
-
-  Mat distToBright;
-  distanceTransform(darkInside, distToBright, DIST_L2, 5);
-
-  Mat searchArea = Mat::zeros(binaryImage.size(), CV_8UC1);
-  circle(searchArea, centroid, kHoleSearchRadius, Scalar(255), FILLED);
+  Mat searchMask = Mat::zeros(binaryImage.size(), CV_8UC1);
+  circle(searchMask, nutCenter, 60, Scalar(255), FILLED);
 
   double holeRadius = 0.0;
   Point holeCenter;
-  minMaxLoc(distToBright, nullptr, &holeRadius, nullptr, &holeCenter,
-            searchArea);
-
+  minMaxLoc(distImage, nullptr, &holeRadius, nullptr, &holeCenter, searchMask);
   cout << "Hole radius: " << holeRadius << "\n";
 
   Mat contourOutput = outerMask.clone();
-  circle(contourOutput, holeCenter, cvRound(holeRadius), Scalar(0), FILLED);
+  circle(contourOutput, holeCenter, holeRadius, Scalar(0), FILLED);
 
-  /*
-   * Decision:
-   * Either signal alone is enough to flag the nut.
-   */
-  bool longPerimeter = perimeter > kPerimeterLimit;
-  bool grayOutside = bandPixels > kBandPixelLimit;
-  bool isDefective = longPerimeter || grayOutside;
+  // Limits come from the good images: max perimeter was 2261 and good nuts
+  // had 0 gray pixels in the ring.
+  bool isDefective = perimeter > 2300 || ringPixels > 100;
+  cout << "Result: " << (isDefective ? "DEFECT" : "OK") << "\n";
 
-  cout << "Result: " << (isDefective ? "DEFECT" : "OK");
-  if (longPerimeter) {
-    cout << " [perimeter]";
-  }
-  if (grayOutside) {
-    cout << " [gray band]";
-  }
-  cout << "\n";
-
-  // Overlay: band hits in red, hole circle in green, verdict in the corner.
-  Mat overlay = image.clone();
-  overlay.setTo(Scalar(0, 0, 255), grayPixels);
-  circle(overlay, holeCenter, cvRound(holeRadius), Scalar(0, 255, 0), 2);
-  putText(overlay, isDefective ? "DEFECT" : "OK", Point(20, 50),
-          FONT_HERSHEY_SIMPLEX, 1.5,
-          isDefective ? Scalar(0, 0, 255) : Scalar(0, 255, 0), 3);
+  // Red: gray pixels found in the ring, green: hole.
+  Mat result = image.clone();
+  result.setTo(Scalar(0, 0, 255), grayPixels);
+  circle(result, holeCenter, holeRadius, Scalar(0, 255, 0), 2);
 
   Mat maskBgr;
   cvtColor(contourOutput, maskBgr, COLOR_GRAY2BGR);
 
   Mat comparison;
-  hconcat(overlay, maskBgr, comparison);
+  hconcat(result, maskBgr, comparison);
 
   if (!imwrite("nut_result.png", comparison)) {
     cerr << "Could not save the result.\n";
   }
 
-  // Pass --no-gui as the second argument to skip the window (batch runs).
-  bool showWindow = !(argc > 2 && string(argv[2]) == "--no-gui");
-  if (showWindow) {
-    imshow("Overlay | Mask", comparison);
-    waitKey(0);
-  }
+  imshow("Result | Mask", comparison);
+  waitKey(0);
   return 0;
 }
