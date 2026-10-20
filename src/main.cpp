@@ -1,6 +1,10 @@
 /**
  * @file main.cpp
- * @brief Finds the metal nut in the image and checks it for bent tabs.
+ * @brief Inspects metal nuts for shape and color defects.
+ *
+ * Segments the nut, measures its perimeter, checks a surrounding
+ * ring for gray pixels, and detects abnormal surface colors.
+ * Produces measurements, a defect decision, and a comparison image.
  */
 
 #include <iostream>
@@ -18,23 +22,17 @@
 using namespace std;
 using namespace cv;
 
-int main(int argc, char **argv) {
-  if (argc < 2) {
-    cerr << "Usage: ./mtest <image_path>\n";
-    return -1;
-  }
+struct InspectionResult {
+  double perimeter = 0.0;
+  int ringPixels = 0;
+  int colorPixels = 0;
 
-  // Input image file path
-  string path = argv[1];
+  bool processingOk = false;
+  bool isDefective = false;
+};
 
-  // Load the target image from disk
-  Mat image = imread(path);
-
-  // Check if the image was successfully loaded
-  if (image.empty()) {
-    cerr << "Error: Image file not found at " << path << "\n";
-    return -1;
-  }
+InspectionResult inspectNut(const Mat &image, Mat &comparison) {
+  InspectionResult result;
 
   Mat grayImage, blurImage;
   cvtColor(image, grayImage, COLOR_BGR2GRAY);
@@ -43,7 +41,6 @@ int main(int argc, char **argv) {
   Mat binaryImage;
   double otsuThreshold =
       threshold(blurImage, binaryImage, 0, 255, THRESH_BINARY + THRESH_OTSU);
-  cout << "Otsu threshold: " << otsuThreshold << "\n";
 
   vector<vector<Point>> contours;
   vector<Vec4i> hierarchy;
@@ -67,26 +64,10 @@ int main(int argc, char **argv) {
   }
 
   if (outerIndex == -1) {
-    cerr << "No outer contour found.\n";
-    return -1;
+    return result;
   }
 
-  vector<Point> hull;
-  convexHull(contours[outerIndex], hull);
-
-  double hullArea = contourArea(hull);
-  double solidity = 0.0;
-  double perimeter = 0.0;
-
-  if (hullArea > 0) {
-    solidity = largestOA / hullArea;
-  }
-
-  perimeter = arcLength(contours[outerIndex], true);
-
-  cout << "Area: " << largestOA << "\n";
-  cout << "Solidity: " << solidity << "\n";
-  cout << "Perimeter: " << perimeter << "\n";
+  result.perimeter = arcLength(contours[outerIndex], true);
 
   Mat outerMask = Mat::zeros(binaryImage.size(), CV_8UC1);
   drawContours(outerMask, contours, outerIndex, Scalar(255), FILLED);
@@ -109,8 +90,7 @@ int main(int argc, char **argv) {
   inRange(blurImage, 35, otsuThreshold, grayPixels);
   bitwise_and(grayPixels, ringMask, grayPixels);
 
-  int ringPixels = countNonZero(grayPixels);
-  cout << "Gray pixels in ring: " << ringPixels << "\n";
+  result.ringPixels = countNonZero(grayPixels);
 
   // Center hole: find the dark pixel that is farthest from any bright pixel.
   // Its distance is the hole radius. Only search near the nut center.
@@ -126,13 +106,11 @@ int main(int argc, char **argv) {
   double holeRadius = 0.0;
   Point holeCenter;
   minMaxLoc(distImage, nullptr, &holeRadius, nullptr, &holeCenter, searchMask);
-  cout << "Hole radius: " << holeRadius << "\n";
 
   Mat contourOutput = outerMask.clone();
   circle(contourOutput, holeCenter, holeRadius, Scalar(0), FILLED);
 
   Mat labImage;
-  Mat channel[3];
   cvtColor(image, labImage, COLOR_BGR2Lab);
 
   Mat colorMask;
@@ -151,29 +129,71 @@ int main(int argc, char **argv) {
   Mat kernel = getStructuringElement(MORPH_ELLIPSE, Size(9, 9));
   morphologyEx(colorDefects, colorDefects, MORPH_OPEN, kernel);
 
-  int colorPixels = countNonZero(colorDefects);
-  cout << "Color defect pixels: " << colorPixels << "\n";
+  result.colorPixels = countNonZero(colorDefects);
 
-  bool isDefective = perimeter > 2300 || ringPixels > 100 || colorPixels > 700;
-  cout << "Result: " << (isDefective ? "DEFECT" : "OK") << "\n";
+  // Limits come from the 242 good images: max perimeter 2261,
+  // 0 gray pixels in the ring, at most 634 color pixels.
+  result.isDefective = result.perimeter > 2300 || result.ringPixels > 100 ||
+                       result.colorPixels > 700;
 
-  // Red: gray pixels found in the ring, green: hole.
-  Mat result = image.clone();
-  result.setTo(Scalar(0, 0, 255), grayPixels);
-  result.setTo(Scalar(255, 0, 0), colorDefects);
-  circle(result, holeCenter, holeRadius, Scalar(0, 255, 0), 2);
+  // Red: gray pixels in the ring, blue: color defects, green: hole.
+  Mat out = image.clone();
+  out.setTo(Scalar(0, 0, 255), grayPixels);
+  out.setTo(Scalar(255, 0, 0), colorDefects);
+  circle(out, holeCenter, holeRadius, Scalar(0, 255, 0), 2);
 
   Mat maskBgr;
   cvtColor(contourOutput, maskBgr, COLOR_GRAY2BGR);
 
+  hconcat(out, maskBgr, comparison);
+
+  result.processingOk = true;
+  return result;
+}
+
+int main(int argc, char **argv) {
+  if (argc < 2) {
+    cerr << "Usage: ./mtest <image_path>\n";
+    return -1;
+  }
+
+  // Input image file path
+  string path = argv[1];
+
+  // Load the target image from disk
+  Mat image = imread(path);
+
+  // Check if the image was successfully loaded
+  if (image.empty()) {
+    cerr << "Error: Image file not found at " << path << "\n";
+    return -1;
+  }
+
   Mat comparison;
-  hconcat(result, maskBgr, comparison);
+
+  InspectionResult inspection = inspectNut(image, comparison);
+
+  if (!inspection.processingOk) {
+    cerr << "Error: nut not found" << "\n";
+    return -1;
+  }
+
+  if (comparison.empty()) {
+    cerr << "Comparison image couldn't be created!" << "\n";
+    return -1;
+  }
+
+  cout << "Perimeter: " << inspection.perimeter << "\n";
+  cout << "Ring pixels: " << inspection.ringPixels << "\n";
+  cout << "Color pixels: " << inspection.colorPixels << "\n";
+  cout << "Result: " << (inspection.isDefective ? "DEFECT" : "OK") << "\n";
 
   if (!imwrite("nut_result.png", comparison)) {
     cerr << "Could not save the result.\n";
+    return -1;
   }
 
-  imshow("Result | Mask", comparison);
+  imshow("Result", comparison);
   waitKey(0);
   return 0;
 }
