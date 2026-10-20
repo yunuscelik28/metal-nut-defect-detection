@@ -131,14 +131,36 @@ int main(int argc, char **argv) {
   Mat contourOutput = outerMask.clone();
   circle(contourOutput, holeCenter, holeRadius, Scalar(0), FILLED);
 
-  // Limits come from the good images: max perimeter was 2261 and good nuts
-  // had 0 gray pixels in the ring.
-  bool isDefective = perimeter > 2300 || ringPixels > 100;
+  Mat labImage;
+  Mat channel[3];
+  cvtColor(image, labImage, COLOR_BGR2Lab);
+
+  Mat colorMask;
+  colorMask = contourOutput.clone();
+  circle(colorMask, holeCenter, holeRadius + 30, Scalar(0), FILLED);
+
+  int aMin = 110, bMin = 115;
+  int aMax = 134, bMax = 145;
+  Mat normalColor;
+  inRange(labImage, Scalar(0, aMin, bMin), Scalar(255, aMax, bMax),
+          normalColor);
+  Mat abnormalColor = ~normalColor;
+  Mat colorDefects;
+  bitwise_and(abnormalColor, colorMask, colorDefects);
+
+  Mat kernel = getStructuringElement(MORPH_ELLIPSE, Size(9, 9));
+  morphologyEx(colorDefects, colorDefects, MORPH_OPEN, kernel);
+
+  int colorPixels = countNonZero(colorDefects);
+  cout << "Color defect pixels: " << colorPixels << "\n";
+
+  bool isDefective = perimeter > 2300 || ringPixels > 100 || colorPixels > 700;
   cout << "Result: " << (isDefective ? "DEFECT" : "OK") << "\n";
 
   // Red: gray pixels found in the ring, green: hole.
   Mat result = image.clone();
   result.setTo(Scalar(0, 0, 255), grayPixels);
+  result.setTo(Scalar(255, 0, 0), colorDefects);
   circle(result, holeCenter, holeRadius, Scalar(0, 255, 0), 2);
 
   Mat maskBgr;
