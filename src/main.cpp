@@ -7,6 +7,10 @@
  * Produces measurements, a defect decision, and a comparison image.
  */
 
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <ios>
 #include <iostream>
 #include <opencv2/core.hpp>
 #include <opencv2/core/base.hpp>
@@ -14,7 +18,9 @@
 #include <opencv2/core/mat.hpp>
 #include <opencv2/core/matx.hpp>
 #include <opencv2/core/types.hpp>
+#include <opencv2/core/utility.hpp>
 #include <opencv2/highgui.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <opencv2/opencv.hpp>
 #include <string>
 #include <vector>
@@ -151,14 +157,84 @@ InspectionResult inspectNut(const Mat &image, Mat &comparison) {
   return result;
 }
 
+int runFolder(const string &folder) {
+  vector<string> files;
+  glob(folder + "/*.png", files, false);
+
+  if (files.empty()) {
+    cerr << "Error: folder is empty..." << "\n";
+    return -1;
+  }
+
+  ofstream csv("results.csv");
+
+  if (!csv.is_open()) {
+    cerr << "Error: results.csv couldn't open..." << "\n";
+    return -1;
+  }
+
+  csv << "file,perimeter,ringPixels,colorPixels,result" << "\n";
+  csv << fixed << setprecision(2);
+
+  int defectCount = 0;
+  int okCount = 0;
+
+  for (int i = 0; i < static_cast<int>(files.size()); ++i) {
+    string path = files[i];
+
+    Mat image = imread(path);
+
+    if (image.empty()) {
+      cerr << "Error: Image file not found at " << path << "\n";
+      continue;
+    }
+
+    Mat comparison;
+    InspectionResult inspection = inspectNut(image, comparison);
+
+    if (!inspection.processingOk) {
+      cerr << "Error: nut not found" << "\n";
+      csv << path << ",0,0,0,ERROR" << "\n";
+      continue;
+    }
+
+    csv << path << "," << inspection.perimeter << "," << inspection.ringPixels
+        << "," << inspection.colorPixels << ","
+        << (inspection.isDefective ? "DEFECT" : "OK") << "\n";
+
+    if (inspection.isDefective) {
+      ++defectCount;
+    } else {
+      ++okCount;
+    }
+  }
+
+  csv.close();
+
+  if (!csv) {
+    cerr << "An error occurred while writing the CSV.\n";
+    return -1;
+  }
+
+  cout << defectCount << " DEFECT / " << okCount << " OK  " << "\n";
+
+  cout << "The results have been written to the results.csv file..\n";
+
+  return 0;
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) {
-    cerr << "Usage: ./mtest <image_path>\n";
+    cerr << "Usage: ./mtest <image_or_folder>\n";
     return -1;
   }
 
   // Input image file path
   string path = argv[1];
+
+  if (filesystem::is_directory(path)) {
+    return runFolder(path);
+  }
 
   // Load the target image from disk
   Mat image = imread(path);
