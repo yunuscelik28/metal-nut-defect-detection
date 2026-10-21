@@ -1,3 +1,4 @@
 build/
 .cache/
 data/metal_nut/
+compile_commands.json

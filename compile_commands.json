@@ -1,8 +1,0 @@
-[
-{
-  "directory": "/mnt/c/users/yunus/C++/For_Github/vision-project/build",
-  "command": "/usr/bin/c++  -I/mnt/c/users/yunus/C++/For_Github/vision-project/include/vision -isystem /usr/include/opencv4 -std=gnu++17 -o CMakeFiles/mtest.dir/src/main.cpp.o -c /mnt/c/users/yunus/C++/For_Github/vision-project/src/main.cpp",
-  "file": "/mnt/c/users/yunus/C++/For_Github/vision-project/src/main.cpp",
-  "output": "CMakeFiles/mtest.dir/src/main.cpp.o"
-}
-]
